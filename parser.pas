@@ -605,19 +605,19 @@ var
     begin
       gattr.typ := ident^.typ;
       gattr.kind := akvar;
-      if ident^.vaccess = vaindirect then
+      gattr.vaccess := ident^.vaccess;
+      gattr.vaddr := ident^.vaddr;
+      gattr.vlev := ident^.vlev;
+      if gattr.vaccess = vaindirect then
       begin
         ltyp := gattr.typ;
-        gattr.typ := intptr;
+        gattr.typ := nilptr;
+        gattr.vaccess := vadirect;
         load;
         gattr.typ := ltyp;
         gattr.kind := akvar;
         gattr.vaccess := vaindirect;
         gattr.vaddr := 0;
-      end else begin
-        gattr.vaccess := vadirect;
-        gattr.vaddr := ident^.vaddr;
-        gattr.vlev := ident^.vlev;
       end;
 
       while token in selecttokens do
@@ -1221,19 +1221,67 @@ var
           if not done then loadtoken;
         until done;
 
-        (* put in declaration order *)
-        ident := last;
+        (* reverse order *)
+        ident := first;
         nxt := nil;
         while ident <> nil do
         begin
           last := ident;
-          last^.next := nxt;
-          nxt := ident;
           ident := ident^.next;
+          last^.next := nxt;
+          nxt := last;
         end;
 
         funcid^.fparams := nxt;
       end;  (* parameterlist *)
+
+      procedure parameteroffset;
+      var
+        parm: pident;
+        size, i: integer;
+        parmsize: array of integer;
+      begin
+        parm := funcid^.fparams;
+        size := 8;
+        if funcid^.fconv <> ccpascal then
+        begin
+          while parm <> nil do
+          begin
+            parm^.vaddr := size;
+            if parm^.vaccess = vadirect then align(size, parm^.typ)
+                                        else align(size, nilptr);
+            parm := parm^.next;
+          end
+        end else begin
+          setlength(parmsize, 0);
+          i := 0;
+          while parm <> nil do
+          begin
+            setlength(parmsize, length(parmsize) + 1);
+            if parm^.vaccess = vadirect then parmsize[i] := parm^.typ^.size
+                                        else parmsize[i] := nilptr^.size;
+            parm := parm^.next;
+            inc(i);
+          end;
+
+          for i := 0 to high(parmsize) do
+          begin
+            inc(size, parmsize[i]);
+            while (size mod dataal) <> 0 do inc(size);
+          end;
+
+          parm := funcid^.fparams;
+          i := high(parmsize);
+          while parm <> nil do
+          begin
+            dec(size, parmsize[i]);
+            while (size mod dataal) <> 0 do dec(size);
+            parm^.vaddr := size;
+            parm := parm^.next;
+            dec(i);
+          end;
+        end;
+      end;  (* parameteroffset *)
 
     begin (* funcdeclaration *)
       check(tkident);
@@ -1249,7 +1297,6 @@ var
         fparams := nil;
         flocals := 0;
         fconv := ccpascal;
-  //      forw := false;
         forw := frwall;
       end;
       enterid(funcid);
@@ -1292,6 +1339,7 @@ var
 
       if (funcid^.fkind = fkdeclared) and (not funcid^.forw) then
       begin
+        if funcid^.fparams <> nil then parameteroffset;
         block(funcid);
         expect(tksemicolon);
         funcid^.forw := false;
@@ -1302,6 +1350,16 @@ var
     end;  (* funcdeclaration *)
 
     procedure call(ident: pident);
+    type
+      pcodelist = ^tcodelist;
+      tcodelist = record
+        link: pcodelist;
+        code: pcode;
+      end;
+
+    var
+      parmsize: integer;
+      codelist, nxt, last: pcodelist;
 
       procedure ordfunc;
       begin
@@ -1579,6 +1637,45 @@ var
         if cstexpr then fatal('constant expression expected');
       end;  (* excludefunc *)
 
+      procedure parameterlist;
+      var
+        parm: pident;
+        lcode: pcode;
+        nxtcode: pcodelist;
+      begin
+        lcode := code;
+        parmsize := 0;
+        parm := ident^.fparams;
+        expect(tklparent);
+        repeat
+          new(nxtcode);
+          nxtcode^.link := codelist;
+          codelist := nxtcode;
+          code := nil;
+          expression;
+          if not comptypes(gattr.typ, parm^.typ) then error('type mismatch');
+          if parm.vaccess = vaindirect then
+          begin
+            if gattr.kind <> akvar then fatal('variable required');
+            loadaddress;
+            align(parmsize, nilptr);
+          end else begin
+            load;
+            align(parmsize, parm^.typ);
+          end;
+          codelist^.code := code;
+          parm := parm^.next;
+          if parm <> nil then expect(tkcomma);
+        until parm = nil;
+        expect(tkrparent);
+        code := lcode;
+      end;  (* parameterlist *)
+
+      procedure varargslist;
+      begin
+
+      end;  (* varargslist *)
+
     begin // call
       case ident^.fkind of
       fksystem :
@@ -1605,19 +1702,51 @@ var
       fkmain :
         fatal('cannot call main function');
 
-      fkdeclared :
-        begin
-          if cstexpr then fatal('constant expression expected');
-          genopimm(opcall, ident^.faddr, 4);
-        end;
-
+      fkdeclared,
       fkexternal :
         begin
           if cstexpr then fatal('constant expression expected');
-          // call external proc
+
+          codelist := nil;
+
+          (* obtain parameters *)
+          if ident^.fconv = ccvarargs then varargslist
+          else
+            if ident^.fparams <> nil then parameterlist;
+
+          (* reverse parameters list for pascal calling convention *)
+          if ident^.fconv = ccpascal then
+          begin
+            nxt := nil;
+            while codelist <> nil do
+            begin
+              last := codelist;
+              codelist := codelist^.link;
+              last^.link := nxt;
+              nxt := last;
+            end;
+            codelist := nxt;
+          end;
+
+          (* push parameters *)
+          while codelist <> nil do
+          begin
+            mergecode(codelist^.code);
+            codelist := codelist^.link;
+          end;
+
+          (* declared -> direct call, external -> indirect call *)
+          if ident^.fkind = fkdeclared then
+            genopimm(opcall, ident^.faddr, 4)
+          else
+            genopmem(opcall, rgnone, rgnone, 4, 0, ident^.faddr, vaimport);
+
+          (* c calling convention, caller must restore stack *)
+          if ident^.fconv in [cccdecl, ccvarargs] then
+            if parmsize <> 0 then genopregimm(opadd, rgesp, parmsize, 4);
         end;
       end;
-    end;  // call
+    end;  (* call *)
 
     procedure statement;
 
@@ -1626,7 +1755,7 @@ var
         lbl: plabel;
       begin
         searchlabel(lbl);
-        if lbl^.defined then fatal(format('label ''%d'' redefined', [lbl^.name]));
+        if lbl^.defined then error(format('label ''%d'' redefined', [lbl^.name]));
         lbl^.defined := true;
         putlabel(lbl^.ival);
         loadtoken;
@@ -2352,6 +2481,21 @@ var
       end;
     end;  (* expression *)
 
+    function getparmsize: integer;
+    var
+      parm: pident;
+      size: integer;
+    begin
+      parm := func^.fparams;
+      size := 0;
+      while parm <> nil do
+      begin
+        align(size, parm^.typ);
+        parm := parm^.next;
+      end;
+      getparmsize := size;
+    end;  (* getparmsize *)
+
   procedure block(funcid: pident);
   var
     lfunc: pident;
@@ -2415,9 +2559,12 @@ var
       if func^.typ <> nil then genopregmem(opmov, rgeax, rgebp, rgnone, 4, 0, 0, vanone);
       genop(opleave);
     end;
-    genop(opret);
+    if (func^.fparams = nil) or (func^.fconv in [cccdecl, ccvarargs]) then genop(opret)
+    else begin
+      genopimm(opret, getparmsize, 4);
+    end;
 
-    optimize;
+//    optimize;
     emitcode; freecode;
 
     (* check labels definition *)

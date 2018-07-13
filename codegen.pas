@@ -49,7 +49,7 @@ type
                rgax,  rgbx,  rgcx,  rgdx,  rgsi,  rgdi,  rgbp,  rgsp,
                rgeax, rgebx, rgecx, rgedx, rgesi, rgedi, rgebp, rgesp);
 
-  tvirtualaddress = (vanone, vadata, vaconst, vacode);
+  tvirtualaddress = (vanone, vadata, vaconst, vacode, vaimport);
 
   tmemoperand = record
     vaddr: tvirtualaddress;
@@ -95,6 +95,7 @@ procedure genopregimm(opc: topcode; reg: tregister; imm, siz: integer);
 procedure genopregmem(opc: topcode; reg, base, index: tregister; size, scale, offset: integer; vofs: tvirtualaddress);
 procedure genopmemreg(opc: topcode; reg, base, index: tregister; size, scale, offset: integer; vofs: tvirtualaddress);
 procedure genopmemimm(opc: topcode; base, index: tregister; imm, siz, size, scale, offset: integer; vofs: tvirtualaddress);
+procedure mergecode(acode: pcode);
 procedure deletelastopcode;
 
 procedure freecode;
@@ -437,6 +438,20 @@ begin
   entercode(acode)
 end;  (* gentruejump *)
 
+procedure mergecode(acode: pcode);
+begin
+  if acode <> nil then
+  begin
+    while acode^.prev <> nil do acode := acode^.prev;
+    if code <> nil then
+    begin
+      while code^.next <> nil do code := code^.next;
+      code^.next := acode;
+      acode^.prev := code;
+    end;
+  end;
+end;  (* mergecode *)
+
 (* simply suppress last opcode *)
 procedure deletelastopcode;
 begin
@@ -737,7 +752,7 @@ begin
             begin
               if codea^.opcode = opadd then codea^.opcode := opdec
                                        else codea^.opcode := opinc;
-            end;                           
+            end;
     end;
 
     codea := codea^.next;
