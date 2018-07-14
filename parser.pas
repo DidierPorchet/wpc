@@ -127,9 +127,9 @@ type
     typ: pstruc;                               (* value type *)
     case kind: tattrkind of
     akconst : (cval: tconstvalue);             (* constant (immediate value) *)
-    akvar : (vaccess: tvaraccess;              (* variable (where value is) *)
-             vaddr, vlev: integer);
-    akexpr : ()                                (* value (already loaded) *)
+    akvar   : (vaccess: tvaraccess;            (* variable (where value is) *)
+               vaddr, vlev: integer);
+    akexpr  : ()                               (* value (already loaded) *)
   end;
 
   (* initialized data *)
@@ -573,11 +573,11 @@ var
                 genopreg(oppush, rgebx);
               end else begin
                 fatal('load sub level address');
-                // push ebp
-                // mov ebp,[ebp - (vlev * 4)]
-                // lea ebx,[ebp + vaddr]
-                // pop ebp
-                // push ebx
+                genopreg(oppush, rgebp);
+                genopregmem(opmov, rgebp, rgebp, rgnone, 4, 0, -vlev * 4, vanone);
+                genopregmem(oplea, rgebx, rgebp, rgnone, 4, 0, vaddr, vanone);
+                genopreg(oppop, rgebp);
+                genopreg(oppush, rgebx);
               end;
             vaccess := vaindirect;
             vaddr := 0;
@@ -699,10 +699,13 @@ var
 
       procedure ordinaltype(var struc: pstruc);
       var
-        ident, nxt: pident; ival: integer;
+        ident, nxt: pident;
+        ival, ltop: integer;
       begin
         if token = tklparent then
         begin           (* enumeration *)
+          ltop := top;
+          while display[top].kind <> dkblock do dec(top);
           loadtoken;
           new(struc);
           with struc^ do
@@ -732,7 +735,8 @@ var
             if not done then loadtoken
           until done;
           struc^.lconst := ident;
-          expect(tkrparent)
+          expect(tkrparent);
+          top := ltop;
         end else begin
           if token = tkident then
           begin
@@ -1171,7 +1175,8 @@ var
 
     procedure funcdeclaration(isfunction: boolean);
     var
-      funcid: pident;
+      funcid, parm: pident;
+      forw: boolean;
 
       procedure parameterlist;
       var
@@ -1180,6 +1185,12 @@ var
         ident, nxt, last, first: pident;
         struc: pstruc;
       begin
+        if top >= maxtop then fatal('display overflow');
+        inc(top);
+        display[top].labels := nil;
+        display[top].idents := nil;
+        display[top].kind := dkdecl;
+
         first := nil;
         repeat
           if token = tkvar then
@@ -1198,7 +1209,7 @@ var
               typ := nil;
               kind := ikvar;
               vaccess := access;
-              vlev := level;
+              vlev := level + 1;
             end;
             enterid(ident);
             nxt := ident;
@@ -1233,6 +1244,8 @@ var
         end;
 
         funcid^.fparams := nxt;
+
+        dec(top);
       end;  (* parameterlist *)
 
       procedure parameteroffset;
@@ -1285,68 +1298,105 @@ var
 
     begin (* funcdeclaration *)
       check(tkident);
-      new(funcid);
-      with funcid^ do
+
+      notifysearcherr := false;
+      searchid(funcid);
+      notifysearcherr := true;
+      if funcid <> nil then
       begin
-        next := nil;
-        name := strnew(@id);
-        typ := nil;
-        kind := ikfunc;
-        fkind := fkdeclared;
-        genlabel(faddr);
-        fparams := nil;
-        flocals := 0;
-        fconv := ccpascal;
-        forw := frwall;
+        if frwall or (funcid^.kind <> ikfunc) or (funcid^.forw = false) then
+          fatal(format('identifier ''%s'' redeclared', [id]));
+        forw := true;
+        funcid^.forw := false;
+      end else begin
+        new(funcid);
+        with funcid^ do
+        begin
+          next := nil;
+          name := strnew(@id);
+          typ := nil;
+          kind := ikfunc;
+          fkind := fkdeclared;
+          genlabel(faddr);
+          fparams := nil;
+          flocals := 0;
+          fconv := ccpascal;
+          forw := frwall;
+        end;
+        enterid(funcid);
+        forw := false;
       end;
-      enterid(funcid);
       loadtoken;
 
-      if level >= maxlevel then error('level overflow');
-      inc(level);
-      if top = maxtop then fatal('display overflow');
-      inc(top);
-      display[top].labels := nil;
-      display[top].idents := nil;
-      display[top].kind := dkblock;
-
-      (* optional parameters *)
-      if token = tklparent then
+      if not forw then
       begin
-        loadtoken;
-        if token <> tkrparent then
+
+        (* optional parameters *)
+        if token = tklparent then
         begin
-          parameterlist;
-          expect(tkrparent);
-        end else loadtoken;
-      end;
+          loadtoken;
+          if token <> tkrparent then
+          begin
+            parameterlist;
+            expect(tkrparent);
+          end else loadtoken;
+        end;
 
-      (* function's result type *)
-      if isfunction then
-      begin
-        expect(tkcolon);
-        structure(funcid^.typ);
+        (* function's result type *)
+        if isfunction then
+        begin
+          expect(tkcolon);
+          structure(funcid^.typ);
+        end;
       end;
-
       expect(tksemicolon);
 
       (* optional directive *)
       while (token = tkident) or (token = tkforward) do
       begin
+        if token = tkforward then
+        begin
+          if forw then fatal('''forwrd'' used twice');
+          funcid^.forw := true;
+        end else begin
+          if strcomp(@id, 'pascal') = 0 then funcid^.fconv := ccpascal else
+          if strcomp(@id, 'stdcall') = 0 then funcid^.fconv := ccstdcall else
+          if strcomp(@id, 'cdecl') = 0 then funcid^.fconv := cccdecl else
+          if strcomp(@id, 'varargs') = 0 then funcid^.fconv := ccvarargs else
+          if strcomp(@id, 'external') = 0 then
+          begin
+            funcid^.fkind := fkexternal;
+          end else
+            error(format('unknow directive %s', [id]));
+        end;
         loadtoken;
         expect(tksemicolon);
       end;
 
       if (funcid^.fkind = fkdeclared) and (not funcid^.forw) then
       begin
-        if funcid^.fparams <> nil then parameteroffset;
+        if level >= maxlevel then error('level overflow');
+        inc(level);
+        if top = maxtop then fatal('display overflow');
+        inc(top);
+        display[top].labels := nil;
+        display[top].idents := nil;
+        display[top].kind := dkblock;
+        if funcid^.fparams <> nil then
+        begin
+          parameteroffset;
+          parm := funcid^.fparams;
+          while parm <> nil do
+          begin
+            enterid(parm);
+            parm := parm^.next;
+          end;
+        end;
         block(funcid);
         expect(tksemicolon);
-        funcid^.forw := false;
+        dec(top);
+        dec(level);
       end;
-
-      dec(top);
-      dec(level);
     end;  (* funcdeclaration *)
 
     procedure call(ident: pident);
@@ -2564,7 +2614,7 @@ var
       genopimm(opret, getparmsize, 4);
     end;
 
-//    optimize;
+    optimize;
     emitcode; freecode;
 
     (* check labels definition *)
@@ -2650,6 +2700,17 @@ var
         tkfunction  : begin loadtoken; funcdeclaration(true) end;
         tkprocedure : begin loadtoken; funcdeclaration(false) end;
         end
+      end;
+
+      (* check forward functions definition *)
+      ident := display[top].idents;
+      while ident <> nil do
+      begin
+        if ident^.kind = ikfunc then
+          if ident^.fkind = fkdeclared then
+            if ident^.forw then
+              error(format('function ''%s'' undefined', [ident^.name]));
+        ident := ident^.link;
       end;
 
       cstexpr := false;
