@@ -343,7 +343,11 @@ var
                 if (typa^.basetyp = nil) or (typb^.basetyp = nil) then comptypes := true
                 else
                   comptypes := comptypes(typa^.basetyp, typb^.basetyp);
-              end;
+              end else
+                if (typa^.kind = skset) and (typb^.kind = skset) then
+                begin
+                  comptypes := comptypes(typa^.settyp, typb^.settyp);
+                end;
       end
     end;  (* comptypes *)
 
@@ -585,14 +589,14 @@ var
         end else
           if kind = akconst then
           begin
-            if isstring(typ) then
+            if isstring(typ) or (typ^.kind = skset) then
             begin
               genopregmem(oplea, rgebx, rgnone, rgnone, 4, 0, allocstrgcst(typ, cval), vaconst);
               genopreg(oppush, rgebx);
             end;
           end else
             fatal('load address error')
-    end;  // loadaddress
+    end;  (* loadaddress *)
 
     procedure expression; forward;
 
@@ -691,7 +695,7 @@ var
           end;
         end
       end
-    end;  // selector
+    end;  (* selector *)
 
     procedure structure(var struc: pstruc);
     var
@@ -1347,6 +1351,8 @@ var
         begin
           expect(tkcolon);
           structure(funcid^.typ);
+          if not (funcid^.typ^.kind in [skordinal, sksubrange, skpointer]) then
+            fatal('result type must be simple');
         end;
       end;
       expect(tksemicolon);
@@ -1356,7 +1362,7 @@ var
       begin
         if token = tkforward then
         begin
-          if forw then fatal('''forwrd'' used twice');
+          if forw then fatal('''forward'' used twice');
           funcid^.forw := true;
         end else begin
           if strcomp(@id, 'pascal') = 0 then funcid^.fconv := ccpascal else
@@ -1382,6 +1388,7 @@ var
         display[top].labels := nil;
         display[top].idents := nil;
         display[top].kind := dkblock;
+
         if funcid^.fparams <> nil then
         begin
           parameteroffset;
@@ -1392,6 +1399,7 @@ var
             parm := parm^.next;
           end;
         end;
+
         block(funcid);
         expect(tksemicolon);
         dec(top);
@@ -1844,7 +1852,7 @@ var
               load;
               store(lattr);
             end else
-              if lattr.typ^.kind = skarray then
+              if lattr.typ^.kind in [skarray, skset] then
               begin
                 loadaddress;
                 genopregimm(opmov, rgecx, lattr.typ^.size, 4);
@@ -1871,7 +1879,7 @@ var
                 lattr.kind := akvar;
                 lattr.vaccess := vadirect;
                 lattr.vlev := level;
-                lattr.vaddr := -(level * 4);
+                lattr.vaddr := -((level + 1) * 4);
                 store(lattr);
               end else
                 fatal('cannot call function outside expression')
@@ -2076,6 +2084,22 @@ var
           var
             ident: pident;
             ltyp: pstruc;
+            lcstexpr, done: boolean;
+            lattr: tattr;
+            lmin, lmax, first, i: integer;
+
+            procedure setbit(pset: pointer; value, lmin: integer);
+            var
+              bit, byt: integer;
+            begin
+              bit := (value - lmin) mod 8;
+              byt := (value - lmin) div 8;
+              pset := pointer(integer(pset) + byt);
+              byt := byte(pset^);
+              byt := byt or (1 shl bit);
+              byte(pset^) := byt;
+            end;  (* setbit *)
+
           begin
             case token of
             tklparent :
@@ -2086,12 +2110,57 @@ var
               end;
 
             tklbracket :
-              fatal('set not supported');
+              begin
+                loadtoken;
+                lcstexpr := cstexpr;
+                cstexpr := true;
+                ltyp := nil;
+                repeat
+                  expression;
+                  if ltyp = nil then
+                  begin
+                    if not (gattr.typ^.kind in [skordinal, sksubrange]) then
+                      fatal('ordinal required');
+                    ltyp := gattr.typ;
+
+                    (* define new set constant type *)
+                    new(lattr.typ);
+                    lattr.typ^.kind := skset;
+                    lattr.typ^.settyp := ltyp;
+                    getbounds(ltyp, lmin, lmax);
+                    lattr.typ^.size := (lmax - lmin) + 1;
+                    if (lattr.typ^.size and 7) <> 0 then
+                      lattr.typ^.size := (lattr.typ^.size shr 3) + 1
+                    else lattr.typ^.size := lattr.typ^.size shr 3;
+                    lattr.kind := akconst;
+                    getmem(lattr.cval.sval, lattr.typ^.size);
+                    fillchar(lattr.cval.sval^, lattr.typ^.size, 0); (* null set *)
+                  end else
+                    if not comptypes(gattr.typ, ltyp) then fatal('type mismatch');
+
+                  if token = tkcolon then
+                  begin
+                    first := gattr.cval.ival;
+                    loadtoken;
+                    expression;
+                    if not comptypes(gattr.typ, ltyp) then fatal('type mismatch');
+                    for i := first to gattr.cval.ival do
+                      setbit(lattr.cval.sval, i, lmin);
+                  end else
+                    setbit(lattr.cval.sval, gattr.cval.ival, lmin);
+
+                  done := token <> tkcomma;
+                  if not done then loadtoken;
+                until done;
+                expect(tkrbracket);
+                gattr := lattr;
+                cstexpr := lcstexpr;
+              end;
 
             tknot :
               begin
-                loadtoken;
                 factor;
+                loadtoken;
                 if comptypes(gattr.typ, intptr) then
                 begin
                   if gattr.kind = akconst then
@@ -2146,7 +2215,7 @@ var
                   fatal('type mismatch');
               end;
 
-            tkaroba :      (* return address of expression and typed pointer *)
+            tkaroba :      (* return address of expression as typed pointer *)
               begin
                 loadtoken;
                 expression;
@@ -2548,26 +2617,21 @@ var
 
   procedure block(funcid: pident);
   var
-    lfunc: pident;
+    lfunc, parm: pident;
   begin (* block *)
     lfunc := func;
     func := funcid;
 
-    (* reserve local storage to function's result *)
-    if func^.typ <> nil then
+    if funcid^.typ <> nil then
     begin
-      new(ident);
-      with ident^ do
-      begin
-        next := nil;
-        name := 'result          ';
-        typ := func^.typ;
-        kind := ikvar;
-        vaccess := vadirect;
-        vlev := level;
-        allocvar(vaddr, typ);
-      end;
-      enterid(ident);
+      new(parm);
+      parm^.next := nil;
+      parm^.name := strnew('result');
+      parm^.typ := funcid^.typ;
+      parm^.kind := ikvar;
+      parm^.vaccess := vadirect;
+      allocvar(parm^.vaddr, funcid^.typ);
+      parm^.vlev := level;
     end;
 
     (* declarations part *)
@@ -2606,7 +2670,7 @@ var
     putlabel(exitlbl);
     if func^.fkind = fkdeclared then
     begin
-      if func^.typ <> nil then genopregmem(opmov, rgeax, rgebp, rgnone, 4, 0, 0, vanone);
+      if func^.typ <> nil then genopregmem(opmov, rgeax, rgebp, rgnone, 4, 0, parm^.vaddr, vanone);
       genop(opleave);
     end;
     if (func^.fparams = nil) or (func^.fconv in [cccdecl, ccvarargs]) then genop(opret)
