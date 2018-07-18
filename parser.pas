@@ -159,6 +159,7 @@ var
   charptr: pstruc;
 //  realptr: pstruc;
   nilptr: pstruc;
+  strptr: pstruc;
   frwtyp: pident;
   cstexpr: boolean;
   constants: pidata;
@@ -1524,10 +1525,18 @@ var
           load;
           genopreg(oppop, rgeax);
           genopreg(oppop, rgebx);
-          genopmemreg(opadd, rgeax, rgebx, rgnone, 4, 0, 0, vanone);
+          case lattr.typ^.size of
+          1 : genopmemreg(opadd, rgal, rgebx, rgnone, 1, 0, 0, vanone);
+          2 : genopmemreg(opadd, rgax, rgebx, rgnone, 2, 0, 0, vanone);
+          4 : genopmemreg(opadd, rgeax, rgebx, rgnone, 4, 0, 0, vanone);
+          end;
         end else begin
           genopreg(oppop, rgebx);
-          genopmemimm(opinc, rgebx, rgnone, 1, 1, 4, 0, 0, vanone);
+          case lattr.typ^.size of
+          1 : genopmemimm(opinc, rgebx, rgnone, 1, 1, 1, 0, 0, vanone);
+          2 : genopmemimm(opinc, rgebx, rgnone, 2, 1, 2, 0, 0, vanone);
+          4 : genopmemimm(opinc, rgebx, rgnone, 4, 1, 4, 0, 0, vanone);
+          end;
         end;
         expect(tkrparent);
       end;  (* incfunc *)
@@ -1956,8 +1965,120 @@ var
       end;  // casestatement
 
       procedure forstatement;
+      var
+        vtyp: pstruc;
+        addr, vsize, incr: integer;
+        global: boolean;
+        lbl1, lbl2: integer;
+        op: topcode;
       begin
-      end;  // forstatement
+        lbl1 := nextlbl; genlabel(nextlbl);
+        lbl2 := breaklbl; genlabel(breaklbl);
+        check(tkident);
+        genlinenumber(chline);
+        searchid(ident);
+
+        if ident^.kind = ikunit then
+        begin
+          loadtoken;
+          expect(tkperiod);
+          check(tkident);
+          searchlist(display[disx].idents, ident);
+        end;
+
+        loadtoken;
+        if ident.kind <> ikvar then fatal('variable required');
+        if ident.vlev <> level then fatal('direct variable required');
+        if not (ident.typ^.kind in [skordinal, sksubrange]) then fatal('ordinal type required');
+        global := level = 0;
+        addr := ident.vaddr;
+        vsize := ident.typ^.size;
+        vtyp := ident.typ;
+
+        expect(tkassign);
+
+        (* load initial value in counter var *)
+        expression;
+        if not comptypes(gattr.typ, vtyp) then fatal('type mismatch');
+        load;
+        genopreg(oppop, rgeax);
+        if global then
+        begin
+          case vsize of
+          1 : genopmemreg(opmov, rgal, rgnone, rgnone, 1, 0, addr, vadata);
+          2 : genopmemreg(opmov, rgax, rgnone, rgnone, 2, 0, addr, vadata);
+          4 : genopmemreg(opmov, rgeax, rgnone, rgnone, 4, 0, addr, vadata);
+          end;
+        end else begin
+          case vsize of
+          1 : genopmemreg(opmov, rgal, rgebp, rgnone, 1, 0, addr, vanone);
+          2 : genopmemreg(opmov, rgax, rgebp, rgnone, 2, 0, addr, vanone);
+          4 : genopmemreg(opmov, rgeax, rgebp, rgnone, 4, 0, addr, vanone);
+          end;
+        end;
+
+        (* determine increment value *)
+        if token = tkto then incr := 1
+        else
+          if token = tkdownto then incr := -1
+          else
+            expect(tkto);
+        loadtoken;
+
+        (* check counter with final value *)
+        putlabel(nextlbl);
+        expression;
+        load;
+        genopreg(oppop, rgeax);
+        if global then
+        begin
+          case vsize of
+          1 : genopmemreg(opcmp, rgal, rgnone, rgnone, 1, 0, addr, vadata);
+          2 : genopmemreg(opcmp, rgax, rgnone, rgnone, 2, 0, addr, vadata);
+          4 : genopmemreg(opcmp, rgeax, rgnone, rgnone, 4, 0, addr, vadata);
+          end;
+        end else begin
+          case vsize of
+          1 : genopmemreg(opcmp, rgal, rgebp, rgnone, 1, 0, addr, vanone);
+          2 : genopmemreg(opcmp, rgax, rgebp, rgnone, 2, 0, addr, vanone);
+          4 : genopmemreg(opcmp, rgeax, rgebp, rgnone, 4, 0, addr, vanone);
+          end;
+        end;
+        if incr = 1 then
+        begin
+          if comptypes(vtyp, intptr) then
+            genopimm(opjg, breaklbl, 4)
+          else genopimm(opja, breaklbl, 4);
+        end else begin
+          if comptypes(vtyp, intptr) then
+            genopimm(opjl, breaklbl, 4)
+          else genopimm(opjb, breaklbl, 4);
+        end;
+
+        expect(tkdo);
+        statement;
+
+        (* increment counter *)
+        if incr = 1 then op := opinc else op := opdec;
+        if global then
+        begin
+          case vsize of
+          1 : genopmem(op, rgnone, rgnone, 1, 0, addr, vadata);
+          2 : genopmem(op, rgnone, rgnone, 2, 0, addr, vadata);
+          4 : genopmem(op, rgnone, rgnone, 4, 0, addr, vadata);
+          end;
+        end else begin
+          case vsize of
+          1 : genopmem(op, rgebp, rgnone, 1, 0, addr, vanone);
+          2 : genopmem(op, rgebp, rgnone, 2, 0, addr, vanone);
+          4 : genopmem(op, rgebp, rgnone, 4, 0, addr, vanone);
+          end;
+        end;
+        genjump(nextlbl);
+        putlabel(breaklbl);
+        nextlbl := lbl1;
+        breaklbl := lbl2;
+      end;  (* forstatement *)
 
       procedure whilestatement;
       var
@@ -2908,7 +3029,14 @@ procedure initparser;
       kind := skpointer;
       basetyp := nil;
     end;
-  end;  // initstdtypes
+
+    new(strptr);
+    with strptr^ do
+    begin
+      size := 4;
+      kind := skstring;
+    end;
+  end;  (* initstdtypes *)
 
   procedure initstdidents;
   var
@@ -2953,6 +3081,15 @@ procedure initparser;
       kind := iktype;
     end;
     enterid(ident);
+
+    new(ident);
+    with ident^ do
+    begin
+      next := nil;
+      name := strnew('string');
+      typ := strptr;
+      kind := iktype;
+    end;
 
     new(ident);
     with ident^ do
@@ -3167,7 +3304,7 @@ procedure initparser;
       faddr := sysfreememindex;
     end;
     enterid(ident);
-  end;  // initstdidents
+  end;  (* initstdidents *)
 
 begin
   nextlabel := 0;
@@ -3184,10 +3321,10 @@ begin
   display[0].kind := dkblock;
   initstdtypes;
   initstdidents;
-end;
+end;  (* initparser *)
 
 procedure doneparser;
 begin
-end;
+end;  (* doneparser *)
 
 end.
